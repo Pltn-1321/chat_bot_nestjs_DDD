@@ -2,7 +2,8 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  engineType = "binary"  // Utilise le moteur binaire PostgreSQL (pas le nouveau moteur WebAssembly)
 }
 
 // En Prisma 7, l'URL de connexion est configurée dans prisma.config.ts
@@ -47,4 +48,47 @@ model Mission {
   updatedAt     DateTime     @updatedAt
 
   @@map("missions") // Nom de la table en base
+}
+
+// ============================================
+// MODÈLES CHAT - Chatbot avec Tools
+// ============================================
+
+/// Une conversation regroupe un ensemble de messages échangés avec le chatbot
+model Conversation {
+  id        String    @id @default(uuid())
+  title     String?   // Titre optionnel (généré à partir du premier message)
+  messages  Message[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("conversations")
+}
+
+/// Un message dans une conversation (utilisateur, assistant, ou résultat d'outil)
+model Message {
+  id             String       @id @default(uuid())
+
+  // Relation avec la conversation
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversationId String
+
+  // Type de message : 'user' | 'assistant' | 'tool'
+  role           String
+
+  // Contenu textuel (nullable pour les appels d'outils)
+  content        String?
+
+  // Pour les messages assistant avec appels d'outils
+  toolCalls      Json?        // Array de {id, name, arguments}
+
+  // Pour les messages de résultat d'outil
+  toolCallId     String?
+  toolName       String?
+
+  createdAt      DateTime     @default(now())
+
+  @@index([conversationId])
+  @@map("messages")
 }
