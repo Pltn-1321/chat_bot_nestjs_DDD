@@ -1,3 +1,8 @@
-export * from './event-bus.service';
-export * from './messaging.module';
-export * from './event-logger.consumer';
+// Adapter RabbitMQ pour le port EventPublisher
+export { RabbitMQEventPublisher } from './event-bus.service';
+
+// Module NestJS
+export { MessagingModule } from './messaging.module';
+
+// Consumer pour debug
+export { EventLoggerConsumer } from './event-logger.consumer';

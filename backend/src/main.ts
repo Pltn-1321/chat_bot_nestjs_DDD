@@ -2,9 +2,15 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
+import { DomainExceptionFilter } from './shared/presentation/filters';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Filtre global pour traduire les exceptions Domain en HTTP
+  // Architecture Hexagonale: les services lèvent des exceptions pures,
+  // ce filtre les traduit en réponses HTTP appropriées
+  app.useGlobalFilters(new DomainExceptionFilter());
 
   // Validation globale des DTOs avec class-validator
   app.useGlobalPipes(

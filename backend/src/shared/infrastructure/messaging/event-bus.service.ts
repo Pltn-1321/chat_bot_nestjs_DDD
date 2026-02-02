@@ -1,12 +1,20 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { DomainEvent } from '../../domain';
+import { DomainEvent, EventPublisher } from '../../domain';
 import * as amqp from 'amqp-connection-manager';
 import { ChannelWrapper } from 'amqp-connection-manager';
 import { Channel } from 'amqplib';
 
 /**
- * EventBusService - Publie les Domain Events vers RabbitMQ
+ * RabbitMQEventPublisher - ADAPTER qui implémente le Port EventPublisher
+ *
+ * Cet adapter implémente l'interface EventPublisher du Domain
+ * en utilisant RabbitMQ comme broker de messages.
+ *
+ * Architecture Hexagonale:
+ * - Le Port (EventPublisher) est dans shared/domain/ports/
+ * - Cet Adapter est dans shared/infrastructure/messaging/
+ * - Les services Application injectent le PORT, pas cet adapter directement
  *
  * Utilise un Topic Exchange pour permettre le routing par pattern:
  * - intervenant.created
@@ -19,8 +27,8 @@ import { Channel } from 'amqplib';
  * - "intervenant.created" → un event spécifique
  */
 @Injectable()
-export class EventBusService implements OnModuleDestroy {
-  private readonly logger = new Logger(EventBusService.name);
+export class RabbitMQEventPublisher implements EventPublisher, OnModuleDestroy {
+  private readonly logger = new Logger(RabbitMQEventPublisher.name);
   private connection: amqp.AmqpConnectionManager;
   private channelWrapper: ChannelWrapper;
 
@@ -59,12 +67,12 @@ export class EventBusService implements OnModuleDestroy {
       setup: async (channel: Channel) => {
         // Déclarer l'exchange (créé s'il n'existe pas)
         await channel.assertExchange(
-          EventBusService.EXCHANGE_NAME,
-          EventBusService.EXCHANGE_TYPE,
+          RabbitMQEventPublisher.EXCHANGE_NAME,
+          RabbitMQEventPublisher.EXCHANGE_TYPE,
           { durable: true },
         );
         this.logger.log(
-          `📢 Exchange "${EventBusService.EXCHANGE_NAME}" prêt`,
+          `📢 Exchange "${RabbitMQEventPublisher.EXCHANGE_NAME}" prêt`,
         );
       },
     });
@@ -95,7 +103,7 @@ export class EventBusService implements OnModuleDestroy {
 
     try {
       await this.channelWrapper.publish(
-        EventBusService.EXCHANGE_NAME,
+        RabbitMQEventPublisher.EXCHANGE_NAME,
         routingKey,
         Buffer.from(payload),
         { contentType: 'application/json' } as any,

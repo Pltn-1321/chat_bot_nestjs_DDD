@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as amqp from 'amqp-connection-manager';
 import { ChannelWrapper } from 'amqp-connection-manager';
 import { Channel, ConsumeMessage } from 'amqplib';
-import { EventBusService } from '../../../../shared/infrastructure/messaging';
+import { RabbitMQEventPublisher } from '../../../../shared/infrastructure/messaging';
 
 /**
  * Payload reçu quand une mission est assignée
@@ -58,7 +58,7 @@ export class IntervenantEventConsumer implements OnModuleInit {
         for (const pattern of this.BINDING_PATTERNS) {
           await channel.bindQueue(
             this.QUEUE_NAME,
-            EventBusService.EXCHANGE_NAME,
+            RabbitMQEventPublisher.EXCHANGE_NAME,
             pattern,
           );
         }

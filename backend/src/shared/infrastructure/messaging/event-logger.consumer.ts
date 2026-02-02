@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as amqp from 'amqp-connection-manager';
 import { ChannelWrapper } from 'amqp-connection-manager';
 import { Channel, ConsumeMessage } from 'amqplib';
-import { EventBusService } from './event-bus.service';
+import { RabbitMQEventPublisher } from './event-bus.service';
 
 /**
  * EventLoggerConsumer - Log tous les Domain Events
@@ -45,7 +45,7 @@ export class EventLoggerConsumer implements OnModuleInit {
         // Lier la queue à l'exchange avec le pattern
         await channel.bindQueue(
           this.QUEUE_NAME,
-          EventBusService.EXCHANGE_NAME,
+          RabbitMQEventPublisher.EXCHANGE_NAME,
           this.BINDING_PATTERN,
         );
 

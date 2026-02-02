@@ -1,12 +1,12 @@
+import { Injectable, Inject } from '@nestjs/common';
+import type { EventPublisher } from '../../../../shared/domain';
 import {
-  Injectable,
-  Inject,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
+  EVENT_PUBLISHER,
+  EntityNotFoundException,
+  BusinessRuleViolationException,
+} from '../../../../shared/domain';
 import { Mission, MISSION_REPOSITORY } from '../../domain';
 import type { MissionRepository } from '../../domain';
-import { EventBusService } from '../../../../shared/infrastructure/messaging';
 import {
   CreateMissionDto,
   UpdateMissionDto,
@@ -17,19 +17,30 @@ import {
 /**
  * MissionService - Couche Application
  *
- * Orchestre les use cases pour les missions.
- * Publie les Domain Events vers RabbitMQ.
+ * Architecture Hexagonale:
+ * - Ce service dépend UNIQUEMENT des PORTS (interfaces)
+ * - Il ne connaît pas Prisma ou RabbitMQ directement
+ * - Les implémentations concrètes sont injectées via les tokens
+ *
+ * Responsabilités:
+ * - Orchestrer les use cases pour les missions
+ * - Coordonner Domain et Infrastructure via les Ports
+ * - Lever des exceptions DOMAIN (pas HTTP)
+ * - Publier les Domain Events via le Port EventPublisher
  */
 @Injectable()
 export class MissionService {
   constructor(
     @Inject(MISSION_REPOSITORY)
     private readonly repository: MissionRepository,
-    private readonly eventBus: EventBusService,
+    @Inject(EVENT_PUBLISHER)
+    private readonly eventPublisher: EventPublisher,
   ) {}
 
   /**
    * Crée une nouvelle mission
+   *
+   * @throws BusinessRuleViolationException si conflit de planning
    */
   async create(dto: CreateMissionDto): Promise<MissionResponseDto> {
     // Si un intervenant est assigné, vérifier les conflits
@@ -39,8 +50,9 @@ export class MissionService {
         dto.date,
       );
       if (hasConflict) {
-        throw new ConflictException(
+        throw new BusinessRuleViolationException(
           `L'intervenant #${dto.intervenantId} a déjà une mission ce jour-là`,
+          'MISSION_SCHEDULING_CONFLICT',
         );
       }
     }
@@ -55,8 +67,8 @@ export class MissionService {
 
     const saved = await this.repository.save(mission);
 
-    // Publier les Domain Events (MissionCreated, éventuellement MissionAssigned)
-    await this.eventBus.publishAll(saved.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(saved.domainEvents);
     saved.clearDomainEvents();
 
     return MissionResponseDto.fromEntity(saved);
@@ -64,12 +76,14 @@ export class MissionService {
 
   /**
    * Récupère une mission par son ID
+   *
+   * @throws EntityNotFoundException si non trouvée
    */
   async findById(id: number): Promise<MissionResponseDto> {
     const mission = await this.repository.findById(id);
 
     if (!mission) {
-      throw new NotFoundException(`Mission #${id} non trouvée`);
+      throw new EntityNotFoundException('Mission', id);
     }
 
     return MissionResponseDto.fromEntity(mission);
@@ -117,12 +131,14 @@ export class MissionService {
 
   /**
    * Met à jour une mission
+   *
+   * @throws EntityNotFoundException si non trouvée
    */
   async update(id: number, dto: UpdateMissionDto): Promise<MissionResponseDto> {
     const mission = await this.repository.findById(id);
 
     if (!mission) {
-      throw new NotFoundException(`Mission #${id} non trouvée`);
+      throw new EntityNotFoundException('Mission', id);
     }
 
     mission.update({
@@ -134,8 +150,8 @@ export class MissionService {
 
     const updated = await this.repository.save(mission);
 
-    // Publier MissionUpdated
-    await this.eventBus.publishAll(updated.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(updated.domainEvents);
     updated.clearDomainEvents();
 
     return MissionResponseDto.fromEntity(updated);
@@ -143,12 +159,15 @@ export class MissionService {
 
   /**
    * Assigne un intervenant à une mission
+   *
+   * @throws EntityNotFoundException si mission non trouvée
+   * @throws BusinessRuleViolationException si conflit de planning
    */
   async assign(id: number, dto: AssignMissionDto): Promise<MissionResponseDto> {
     const mission = await this.repository.findById(id);
 
     if (!mission) {
-      throw new NotFoundException(`Mission #${id} non trouvée`);
+      throw new EntityNotFoundException('Mission', id);
     }
 
     // Vérifier les conflits de planning
@@ -158,8 +177,9 @@ export class MissionService {
       id, // Exclure cette mission
     );
     if (hasConflict) {
-      throw new ConflictException(
+      throw new BusinessRuleViolationException(
         `L'intervenant #${dto.intervenantId} a déjà une mission ce jour-là`,
+        'MISSION_SCHEDULING_CONFLICT',
       );
     }
 
@@ -168,8 +188,8 @@ export class MissionService {
 
     const updated = await this.repository.save(mission);
 
-    // Publier MissionAssigned (et éventuellement MissionUnassigned si réassignation)
-    await this.eventBus.publishAll(updated.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(updated.domainEvents);
     updated.clearDomainEvents();
 
     return MissionResponseDto.fromEntity(updated);
@@ -177,20 +197,22 @@ export class MissionService {
 
   /**
    * Retire l'intervenant d'une mission
+   *
+   * @throws EntityNotFoundException si mission non trouvée
    */
   async unassign(id: number): Promise<MissionResponseDto> {
     const mission = await this.repository.findById(id);
 
     if (!mission) {
-      throw new NotFoundException(`Mission #${id} non trouvée`);
+      throw new EntityNotFoundException('Mission', id);
     }
 
     mission.unassignIntervenant();
 
     const updated = await this.repository.save(mission);
 
-    // Publier MissionUnassigned
-    await this.eventBus.publishAll(updated.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(updated.domainEvents);
     updated.clearDomainEvents();
 
     return MissionResponseDto.fromEntity(updated);
@@ -198,18 +220,20 @@ export class MissionService {
 
   /**
    * Supprime une mission
+   *
+   * @throws EntityNotFoundException si non trouvée
    */
   async delete(id: number): Promise<void> {
     const mission = await this.repository.findById(id);
 
     if (!mission) {
-      throw new NotFoundException(`Mission #${id} non trouvée`);
+      throw new EntityNotFoundException('Mission', id);
     }
 
     mission.markAsDeleted();
 
-    // Publier MissionDeleted AVANT suppression
-    await this.eventBus.publishAll(mission.domainEvents);
+    // Publier les Domain Events AVANT suppression via le Port
+    await this.eventPublisher.publishAll(mission.domainEvents);
     mission.clearDomainEvents();
 
     await this.repository.delete(id);

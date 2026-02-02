@@ -1,7 +1,16 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
-import { PrismaService } from '../../../../shared/infrastructure/prisma/prisma.service';
-import { LangChainAgentService } from '../../infrastructure/ai/langchain-agent.service';
+import { Injectable, Inject, Logger } from '@nestjs/common';
+import type { EventPublisher } from '../../../../shared/domain';
+import {
+  EntityNotFoundException,
+  EVENT_PUBLISHER,
+} from '../../../../shared/domain';
+import type { ConversationRepository, AIAgent } from '../../domain';
+import {
+  Conversation,
+  CONVERSATION_REPOSITORY,
+  AI_AGENT,
+  ToolCall,
+} from '../../domain';
 import { SendMessageDto } from '../dtos/send-message.dto';
 import {
   SendMessageResponseDto,
@@ -13,18 +22,28 @@ import {
 /**
  * ChatService - Couche Application
  *
- * Orchestre les conversations avec le chatbot:
- * - Gère la persistance des conversations (Prisma)
- * - Délègue le traitement des messages à l'agent LangChain
- * - Formate les réponses pour l'API
+ * Architecture Hexagonale:
+ * - Ce service dépend UNIQUEMENT des PORTS (interfaces)
+ * - Il ne connaît pas Prisma, RabbitMQ, ou LangChain directement
+ * - Les implémentations concrètes sont injectées via les tokens
+ *
+ * Responsabilités:
+ * - Orchestrer les use cases pour les conversations
+ * - Coordonner Domain et Infrastructure via les Ports
+ * - Gérer les Domain Events
+ * - Formater les réponses pour l'API
  */
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly agentService: LangChainAgentService,
+    @Inject(CONVERSATION_REPOSITORY)
+    private readonly conversationRepository: ConversationRepository,
+    @Inject(AI_AGENT)
+    private readonly aiAgent: AIAgent,
+    @Inject(EVENT_PUBLISHER)
+    private readonly eventPublisher: EventPublisher,
   ) {}
 
   /**
@@ -36,52 +55,46 @@ export class ChatService {
   ): Promise<SendMessageResponseDto> {
     this.logger.debug(`Message reçu: "${dto.message.slice(0, 50)}..."`);
 
-    // 1. Créer ou récupérer la conversation
-    let conversation = conversationId
-      ? await this.prisma.client.conversation.findUnique({
-          where: { id: conversationId },
-          include: { messages: { orderBy: { createdAt: 'asc' } } },
-        })
-      : null;
+    // 1. Récupérer ou créer la conversation
+    let conversation: Conversation;
 
-    if (!conversation) {
+    if (conversationId) {
+      const existing = await this.conversationRepository.findById(conversationId);
+      if (existing) {
+        conversation = existing;
+      } else {
+        // Créer une nouvelle conversation si l'ID fourni n'existe pas
+        conversation = Conversation.create({
+          title: dto.message.slice(0, 50),
+        });
+        conversation = await this.conversationRepository.save(conversation);
+        this.logger.debug(`Nouvelle conversation créée: ${conversation.id}`);
+      }
+    } else {
       // Créer une nouvelle conversation
-      conversation = await this.prisma.client.conversation.create({
-        data: {
-          title: dto.message.slice(0, 50), // Titre = début du premier message
-        },
-        include: { messages: true },
+      conversation = Conversation.create({
+        title: dto.message.slice(0, 50),
       });
+      conversation = await this.conversationRepository.save(conversation);
       this.logger.debug(`Nouvelle conversation créée: ${conversation.id}`);
     }
 
-    // 2. Sauvegarder le message utilisateur
-    const userMessage = await this.prisma.client.message.create({
-      data: {
-        conversationId: conversation.id,
-        role: 'user',
-        content: dto.message,
-      },
-    });
-
-    // 3. Construire l'historique pour l'agent
-    const chatHistory = conversation.messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({
-        role: m.role as 'user' | 'assistant',
-        content: m.content || '',
-      }));
-
-    // 4. Invoquer l'agent LangChain
-    const agentResponse = await this.agentService.invoke(
-      dto.message,
-      chatHistory,
+    // 2. Ajouter le message utilisateur
+    const userMessage = conversation.addUserMessage(dto.message);
+    const savedUserMessage = await this.conversationRepository.addMessage(
+      conversation.id,
+      userMessage,
     );
+
+    // 3. Récupérer l'historique pour l'agent
+    const chatHistory = conversation.getChatHistory();
+
+    // 4. Invoquer l'agent IA via le Port
+    const agentResponse = await this.aiAgent.invoke(dto.message, chatHistory);
 
     // 5. Extraire les résultats des tools
     const toolResults: ToolResultDto[] = (agentResponse.intermediateSteps || []).map(
       (step) => {
-        // Parser le résultat JSON du tool
         let parsed: { success: boolean; data?: unknown; error?: string };
         try {
           parsed = JSON.parse(step.output);
@@ -98,35 +111,39 @@ export class ChatService {
       },
     );
 
-    // 6. Sauvegarder la réponse de l'assistant
-    // Convertir toolResults en JSON compatible Prisma
-    const toolCallsJson: Prisma.InputJsonValue | undefined =
-      toolResults.length > 0
-        ? JSON.parse(JSON.stringify(toolResults))
-        : undefined;
+    // 6. Ajouter la réponse assistant
+    const toolCalls: ToolCall[] | undefined = toolResults.length > 0
+      ? toolResults.map((tr) => ({
+          id: `${tr.tool}-${Date.now()}`,
+          name: tr.tool,
+          arguments: {},
+        }))
+      : undefined;
 
-    const assistantMessage = await this.prisma.client.message.create({
-      data: {
-        conversationId: conversation.id,
-        role: 'assistant',
-        content: agentResponse.output,
-        toolCalls: toolCallsJson,
-      },
-    });
+    const assistantMessage = conversation.addAssistantMessage(
+      agentResponse.output,
+      toolCalls,
+    );
+    const savedAssistantMessage = await this.conversationRepository.addMessage(
+      conversation.id,
+      assistantMessage,
+    );
 
-    // 7. Construire la réponse
+    // 7. Publier les Domain Events
+    await this.eventPublisher.publishAll(conversation.domainEvents);
+    conversation.clearDomainEvents();
+
+    // 8. Construire la réponse
     const response: MessageResponseDto = {
-      id: assistantMessage.id,
+      id: savedAssistantMessage.id,
       role: 'assistant',
-      content: assistantMessage.content,
-      toolCalls: toolResults.length > 0
-        ? toolResults.map((tr) => ({
-            id: `${tr.tool}-${Date.now()}`,
-            name: tr.tool,
-            arguments: {},
-          }))
-        : undefined,
-      createdAt: assistantMessage.createdAt,
+      content: savedAssistantMessage.content,
+      toolCalls: toolCalls?.map((tc) => ({
+        id: tc.id,
+        name: tc.name,
+        arguments: tc.arguments,
+      })),
+      createdAt: savedAssistantMessage.createdAt,
     };
 
     return {
@@ -140,22 +157,14 @@ export class ChatService {
    * Récupère toutes les conversations
    */
   async getConversations(): Promise<ConversationResponseDto[]> {
-    const conversations = await this.prisma.client.conversation.findMany({
-      orderBy: { updatedAt: 'desc' },
-      include: {
-        messages: {
-          orderBy: { createdAt: 'asc' },
-          take: 1, // Juste le premier message pour l'aperçu
-        },
-      },
-    });
+    const conversations = await this.conversationRepository.findAll();
 
     return conversations.map((conv) => ({
       id: conv.id,
       title: conv.title,
       messages: conv.messages.map((m) => ({
         id: m.id,
-        role: m.role as 'user' | 'assistant' | 'tool',
+        role: m.role.value,
         content: m.content,
         createdAt: m.createdAt,
       })),
@@ -168,15 +177,10 @@ export class ChatService {
    * Récupère une conversation avec tous ses messages
    */
   async getConversation(id: string): Promise<ConversationResponseDto> {
-    const conversation = await this.prisma.client.conversation.findUnique({
-      where: { id },
-      include: {
-        messages: { orderBy: { createdAt: 'asc' } },
-      },
-    });
+    const conversation = await this.conversationRepository.findById(id);
 
     if (!conversation) {
-      throw new NotFoundException(`Conversation ${id} non trouvée`);
+      throw new EntityNotFoundException('Conversation', id);
     }
 
     return {
@@ -184,7 +188,7 @@ export class ChatService {
       title: conversation.title,
       messages: conversation.messages.map((m) => ({
         id: m.id,
-        role: m.role as 'user' | 'assistant' | 'tool',
+        role: m.role.value,
         content: m.content,
         toolCalls: m.toolCalls as any,
         createdAt: m.createdAt,
@@ -198,16 +202,13 @@ export class ChatService {
    * Supprime une conversation
    */
   async deleteConversation(id: string): Promise<void> {
-    const conversation = await this.prisma.client.conversation.findUnique({
-      where: { id },
-    });
+    const conversation = await this.conversationRepository.findById(id);
 
     if (!conversation) {
-      throw new NotFoundException(`Conversation ${id} non trouvée`);
+      throw new EntityNotFoundException('Conversation', id);
     }
 
-    // Les messages sont supprimés en cascade (onDelete: Cascade)
-    await this.prisma.client.conversation.delete({ where: { id } });
+    await this.conversationRepository.delete(id);
     this.logger.debug(`Conversation ${id} supprimée`);
   }
 }

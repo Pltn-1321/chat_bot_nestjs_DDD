@@ -1,12 +1,12 @@
+import { Injectable, Inject } from '@nestjs/common';
+import type { EventPublisher } from '../../../../shared/domain';
 import {
-  Injectable,
-  Inject,
-  NotFoundException,
-  ConflictException,
-} from '@nestjs/common';
+  EVENT_PUBLISHER,
+  EntityNotFoundException,
+  BusinessRuleViolationException,
+} from '../../../../shared/domain';
 import { Intervenant, INTERVENANT_REPOSITORY, Email } from '../../domain';
 import type { IntervenantRepository } from '../../domain';
-import { EventBusService } from '../../../../shared/infrastructure/messaging';
 import {
   CreateIntervenantDto,
   UpdateIntervenantDto,
@@ -16,28 +16,32 @@ import {
 /**
  * IntervenantService - Couche Application
  *
- * Ce service orchestre les USE CASES pour les intervenants.
- * Il utilise le Repository (via l'interface) pour la persistance.
+ * Architecture Hexagonale:
+ * - Ce service dépend UNIQUEMENT des PORTS (interfaces)
+ * - Il ne connaît pas Prisma ou RabbitMQ directement
+ * - Les implémentations concrètes sont injectées via les tokens
  *
  * Responsabilités:
- * - Coordonner le Domain et l'Infrastructure
+ * - Orchestrer les USE CASES pour les intervenants
+ * - Coordonner Domain et Infrastructure via les Ports
  * - Gérer les règles applicatives (ex: vérifier unicité email)
  * - Convertir DTO ↔ Entity ↔ ResponseDTO
- * - Lever des exceptions HTTP appropriées
- * - Publier les Domain Events vers RabbitMQ
+ * - Lever des exceptions DOMAIN (pas HTTP)
+ * - Publier les Domain Events via le Port EventPublisher
  */
 @Injectable()
 export class IntervenantService {
   constructor(
     @Inject(INTERVENANT_REPOSITORY)
     private readonly repository: IntervenantRepository,
-    private readonly eventBus: EventBusService,
+    @Inject(EVENT_PUBLISHER)
+    private readonly eventPublisher: EventPublisher,
   ) {}
 
   /**
    * Crée un nouvel intervenant
    *
-   * @throws ConflictException si l'email existe déjà
+   * @throws BusinessRuleViolationException si l'email existe déjà
    */
   async create(dto: CreateIntervenantDto): Promise<IntervenantResponseDto> {
     // Vérifier que l'email n'existe pas déjà
@@ -45,7 +49,10 @@ export class IntervenantService {
       Email.create(dto.email),
     );
     if (emailExists) {
-      throw new ConflictException(`L'email ${dto.email} est déjà utilisé`);
+      throw new BusinessRuleViolationException(
+        `L'email ${dto.email} est déjà utilisé`,
+        'EMAIL_ALREADY_EXISTS',
+      );
     }
 
     // Créer l'entité Domain (validation métier dans le Domain)
@@ -56,11 +63,11 @@ export class IntervenantService {
       specialite: dto.specialite,
     });
 
-    // Persister via le Repository
+    // Persister via le Repository Port
     const saved = await this.repository.save(intervenant);
 
-    // Publier les Domain Events vers RabbitMQ
-    await this.eventBus.publishAll(saved.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(saved.domainEvents);
     saved.clearDomainEvents();
 
     return IntervenantResponseDto.fromEntity(saved);
@@ -69,13 +76,13 @@ export class IntervenantService {
   /**
    * Récupère un intervenant par son ID
    *
-   * @throws NotFoundException si non trouvé
+   * @throws EntityNotFoundException si non trouvé
    */
   async findById(id: number): Promise<IntervenantResponseDto> {
     const intervenant = await this.repository.findById(id);
 
     if (!intervenant) {
-      throw new NotFoundException(`Intervenant #${id} non trouvé`);
+      throw new EntityNotFoundException('Intervenant', id);
     }
 
     return IntervenantResponseDto.fromEntity(intervenant);
@@ -100,8 +107,8 @@ export class IntervenantService {
   /**
    * Met à jour un intervenant
    *
-   * @throws NotFoundException si non trouvé
-   * @throws ConflictException si le nouvel email existe déjà
+   * @throws EntityNotFoundException si non trouvé
+   * @throws BusinessRuleViolationException si le nouvel email existe déjà
    */
   async update(
     id: number,
@@ -111,7 +118,7 @@ export class IntervenantService {
     const intervenant = await this.repository.findById(id);
 
     if (!intervenant) {
-      throw new NotFoundException(`Intervenant #${id} non trouvé`);
+      throw new EntityNotFoundException('Intervenant', id);
     }
 
     // Si l'email change, vérifier qu'il n'est pas déjà utilisé
@@ -121,7 +128,10 @@ export class IntervenantService {
         id, // Exclure l'intervenant actuel
       );
       if (emailExists) {
-        throw new ConflictException(`L'email ${dto.email} est déjà utilisé`);
+        throw new BusinessRuleViolationException(
+          `L'email ${dto.email} est déjà utilisé`,
+          'EMAIL_ALREADY_EXISTS',
+        );
       }
     }
 
@@ -136,8 +146,8 @@ export class IntervenantService {
     // Persister
     const updated = await this.repository.save(intervenant);
 
-    // Publier les Domain Events vers RabbitMQ
-    await this.eventBus.publishAll(updated.domainEvents);
+    // Publier les Domain Events via le Port
+    await this.eventPublisher.publishAll(updated.domainEvents);
     updated.clearDomainEvents();
 
     return IntervenantResponseDto.fromEntity(updated);
@@ -146,20 +156,20 @@ export class IntervenantService {
   /**
    * Supprime un intervenant
    *
-   * @throws NotFoundException si non trouvé
+   * @throws EntityNotFoundException si non trouvé
    */
   async delete(id: number): Promise<void> {
     const intervenant = await this.repository.findById(id);
 
     if (!intervenant) {
-      throw new NotFoundException(`Intervenant #${id} non trouvé`);
+      throw new EntityNotFoundException('Intervenant', id);
     }
 
     // Marquer comme supprimé (émet l'événement)
     intervenant.markAsDeleted();
 
-    // Publier les Domain Events AVANT suppression
-    await this.eventBus.publishAll(intervenant.domainEvents);
+    // Publier les Domain Events AVANT suppression via le Port
+    await this.eventPublisher.publishAll(intervenant.domainEvents);
     intervenant.clearDomainEvents();
 
     await this.repository.delete(id);

@@ -12,21 +12,19 @@ import { DynamicStructuredTool } from '@langchain/core/tools';
 import { IntervenantService } from '../../../intervenant/application/services/intervenant.service';
 import { MissionService } from '../../../mission/application/services/mission.service';
 import { createChatTools } from './langchain-tools';
+import type {
+  AIAgent,
+  AIAgentResponse,
+  ChatHistoryMessage,
+} from '../../domain/ports';
 
 /**
- * Résultat d'une invocation de l'agent
- */
-export interface AgentResponse {
-  output: string;
-  intermediateSteps?: Array<{
-    tool: string;
-    input: Record<string, unknown>;
-    output: string;
-  }>;
-}
-
-/**
- * Service LangChain Agent
+ * LangChainAgentAdapter - ADAPTER qui implémente le Port AIAgent
+ *
+ * Architecture Hexagonale:
+ * - Le Port (AIAgent) est défini dans domain/ports/
+ * - Cet Adapter implémente le Port en utilisant LangChain + OpenRouter
+ * - Le ChatService injecte le PORT, pas cet adapter directement
  *
  * Ce service encapsule un agent LangChain qui utilise OpenRouter
  * pour le LLM et les tools pour interagir avec les services métier.
@@ -38,8 +36,8 @@ export interface AgentResponse {
  * 4. Le LLM génère la réponse finale
  */
 @Injectable()
-export class LangChainAgentService implements OnModuleInit {
-  private readonly logger = new Logger(LangChainAgentService.name);
+export class LangChainAgentAdapter implements AIAgent, OnModuleInit {
+  private readonly logger = new Logger(LangChainAgentAdapter.name);
   private llm: ChatOpenAI;
   private tools: DynamicStructuredTool[];
   private toolsMap: Map<string, DynamicStructuredTool>;
@@ -119,11 +117,13 @@ Quand l'utilisateur mentionne "demain", "lundi prochain", etc., calcule la date 
 
   /**
    * Invoque l'agent avec un message et l'historique de conversation
+   *
+   * Implémente le Port AIAgent du Domain
    */
   async invoke(
     input: string,
-    chatHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [],
-  ): Promise<AgentResponse> {
+    chatHistory: ChatHistoryMessage[] = [],
+  ): Promise<AIAgentResponse> {
     this.logger.debug(`Invocation avec: "${input.slice(0, 50)}..."`);
 
     const intermediateSteps: Array<{
