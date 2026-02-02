@@ -1,0 +1,50 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// En Prisma 7, l'URL de connexion est configurée dans prisma.config.ts
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================
+// MODÈLES MÉTIER - Gestion des Interventions
+// ============================================
+
+/// Un intervenant est une personne qui réalise des missions d'enseignement
+model Intervenant {
+  id         Int       @id @default(autoincrement())
+  nom        String
+  email      String    @unique
+  telephone  String?
+  specialite String
+
+  // Relation one-to-many : un intervenant peut avoir plusieurs missions
+  missions   Mission[]
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@map("intervenants") // Nom de la table en base
+}
+
+/// Une mission est une intervention d'enseignement assignée à un intervenant
+model Mission {
+  id            Int          @id @default(autoincrement())
+  titre         String
+  date          DateTime
+  duree         Int          // Durée en minutes
+  lieu          String
+
+  // Relation many-to-one : une mission appartient à un intervenant (optionnel)
+  intervenant   Intervenant? @relation(fields: [intervenantId], references: [id])
+  intervenantId Int?
+
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@map("missions") // Nom de la table en base
+}
