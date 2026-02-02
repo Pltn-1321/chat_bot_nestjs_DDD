@@ -40,8 +40,8 @@ export class ConversationMapper {
       role: prismaMessage.role as MessageRoleType,
       content: prismaMessage.content,
       toolCalls,
-      toolCallId: prismaMessage.toolCallId,
-      toolName: prismaMessage.toolName,
+      toolCallId: prismaMessage.toolCallId ?? undefined,
+      toolName: prismaMessage.toolName ?? undefined,
       createdAt: prismaMessage.createdAt,
     });
   }
@@ -78,14 +78,14 @@ export class ConversationMapper {
   static messageToPersistenceCreate(message: Message): {
     role: string;
     content: string | null;
-    toolCalls: unknown;
+    toolCalls: PrismaMessage['toolCalls'];
     toolCallId: string | null;
     toolName: string | null;
   } {
     return {
       role: message.role.value,
       content: message.content,
-      toolCalls: message.toolCalls ? JSON.parse(JSON.stringify(message.toolCalls)) : null,
+      toolCalls: message.toolCalls as PrismaMessage['toolCalls'],
       toolCallId: message.toolCallId,
       toolName: message.toolName,
     };

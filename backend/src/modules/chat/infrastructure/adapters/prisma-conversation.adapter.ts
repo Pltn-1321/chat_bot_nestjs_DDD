@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../../shared/infrastructure/prisma';
 import {
   Conversation,
@@ -85,7 +86,11 @@ export class PrismaConversationRepository implements ConversationRepository {
     const created = await this.prisma.client.message.create({
       data: {
         conversationId,
-        ...data,
+        role: data.role,
+        content: data.content,
+        toolCalls: data.toolCalls === null ? Prisma.JsonNull : data.toolCalls,
+        toolCallId: data.toolCallId,
+        toolName: data.toolName,
       },
     });
 
